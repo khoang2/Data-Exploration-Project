@@ -1,0 +1,143 @@
+---
+title: "Data Exploration Project"
+author: "Kyle"
+format: docx
+editor: visual
+---
+
+## Load Libraries
+
+```{r}
+library(rio)
+library(tidyverse)
+library(lubridate)
+library(dplyr)
+```
+
+## Import Data
+
+```{r}
+filelist <- list.files('Lab3_Rawdata', pattern = 'trends', full.names = TRUE)
+
+my_data <- import_list(filelist, fill = TRUE, rbind = TRUE)
+```
+
+## Data Cleaning
+
+```{r}
+#Turning monthorweek into a single date that's usable
+clean_data <- my_data %>% mutate(actual_date = ymd(str_sub(monthorweek, start = 0, end = 10)))
+
+cleaned_data_month <- clean_data %>%
+  group_by(month = floor_date(actual_date, "month"))
+
+```
+
+## Aggregating
+
+```{r}
+#Aggregate index variable by subtracting mean of index and dividing the result by the standard deviation of index, calculating both of those within school name and keyword 
+aggregated_data <- cleaned_data_month %>%
+  group_by(schname, keyword) %>%
+  mutate(aggregate_index = (index - mean(index)) / sd(index), na.rm = TRUE)
+```
+
+## Reading in the Scorecard Data
+
+```{r}
+#Importing in Scorecard Data, a subfolder from Lab3_Rawdata
+
+scorecard_data <- import("Lab3_Rawdata/Most+Recent+Cohorts+(Scorecard+Elements).csv")
+
+id_name_link <- import('Lab3_Rawdata/id_name_link.csv')
+```
+
+## Merge in the Scorecard Data
+
+```{r}
+#Merging in Scorecard data by opeid and OPEID
+id_name_link_merge <- id_name_link %>%
+  group_by(schname) %>%
+  mutate(n = n()) %>%
+  filter(n() == 1)
+
+schnamemerge <- inner_join(aggregated_data, id_name_link_merge, by = "schname")
+
+merged_data <- inner_join(schnamemerge, scorecard_data, by = c("opeid" = "OPEID"))
+
+```
+
+## Limiting Data To Colleges That Predominantly Grant Bachelor's Degrees and Separating Out Variables We Need
+
+```{r}
+#PREDEG in scorecard data needs to only be 3 to have predominantly the bachelors degrees
+#Sort out variables that we need 
+
+merged_data_important <- merged_data %>%
+  filter(PREDDEG == 3, na.rm = TRUE) %>%
+  group_by(schname, unitid, opeid, month, `md_earn_wne_p10-REPORTED-EARNINGS`)%>%
+  summarise(index = mean(index, na.rm = TRUE), aggregate_index = mean(aggregate_index, na.rm = TRUE))
+```
+
+## Defining High vs Low Earnings Based on Median
+
+```{r}
+#Defining high vs low earnings based on median of earnings
+
+threshold <- median(merged_data_important$`md_earn_wne_p10-REPORTED-EARNINGS`) 
+#median income is 42000
+
+merged_data_important$highvslow <- ifelse(merged_data_important$`md_earn_wne_p10-REPORTED-EARNINGS` >= threshold, "High", "Low")
+```
+
+## Defining our Cutoff (aka Scorecard Data Implementation)
+
+```{r}
+#Defining and implementing our cutoff on Pre September 2015 and Post September 2015 for DID analysis and cutoff for High and Low Earnings
+
+together <- merged_data_important%>%
+  group_by(schname) %>%
+   mutate(aggregate_index = (index - mean(index)) / sd(index), na.rm = TRUE) %>%
+    group_by(month, opeid, `md_earn_wne_p10-REPORTED-EARNINGS`) %>%
+      summarise(aggregate_index = mean(index, na.rm = TRUE))
+
+
+defined_data <- together %>%
+  mutate(highearners = `md_earn_wne_p10-REPORTED-EARNINGS` >= 42000, after = month >= as.Date("2015-09-01"))
+
+```
+
+## The Regression
+
+```{r}
+#Running a difference in differences regression to see the effects of the Google trends index on our high and low earning colleges before and after the Scorecard introduction
+library(fixest)
+
+regression <- feols(aggregate_index ~ highearners*after, data = defined_data)
+etable(regression)
+```
+
+## Write Up
+
+The introduction of the College Scorecard decreased search activity on Google Trends for colleges with high-earning graduates by 1.474 units relative to what it did for colleges with low-earning graduates, with a standard error of 0.2575. This result comes from the "aggregate_index" , "highearners", and "after" coefficient(s) in my regression.
+
+I chose the variables to include in my analysis because I wanted to run difference in differences (DID) analysis to compare the results of the Google Trends search activity on colleges with high earning graduates relative to colleges with low earning graduates, before and after the Scorecard data was introduced. DID in my opinion, was the best option to illustrate this. Therefore I needed to make a variable for after the implementation of the Scorecard. Since high and low income was not defined, I decided to create a cutoff in income using the median income as a threshold. I found this number to be \$42000. Anything above that was considered high income and anything below that was considered low income. Further, I needed to filter out the colleges to those that predominantly grant bachelor's degrees using PREDEG = 3. I also needed to turn the monthorweek variable into a single date that's usable, as it was a range of dates. I then simplified it down further to just the months as that was simpler and still allowed us to see the results over time. I also aggregated the index variable by subtracting the mean of index and dividing the result by the standard deviation of index.
+
+My analysis addresses the research question because it shows the effects of the Scorecard data on Google trends searches on high and low income colleges, before and after September 2015, when the Scorecard data was introduced. In the graph below, the Google Index results are on the Y-axis and the Time in Years is on the X -axis. The blue line shows colleges with high-earning graduates and the red line shows colleges with low-earning graduates. The graph overall shows how overtime, the Google trends searches were already decreasing in waves, and after the Scorecard data was introduced in September 2015, it continued to decrease in waves.
+
+In conclusion, our DID analysis shows some significance at the 95% level, however, with a decrease of -1.474 units, it is not convincing enough to conclude that the introduction of the Scorecard data had much of an effect on high-earning graduates relative to what it did for low-earning graduates.
+
+## **Visualization**
+
+```{r}
+#The colors show the colleges with high earning graduates (Blue) and colleges with low earning graduates (Red) and the graph shows the Google search index before September 2015 and after September 2015. 
+
+library(ggplot2)
+
+#clean up: groupby and summarize "month" and "after" and take the mean index of the group
+for_viz <- defined_data %>%
+  group_by(month, highearners) %>%
+  summarise(new_index = mean(aggregate_index, na.rm = TRUE))
+
+ggplot(data = for_viz, aes (x = month, y = new_index, color = highearners)) + geom_line() + geom_vline(xintercept = as.Date(ymd("2015-09-01"))) + theme_minimal() + labs(x = "Year", y = "Google Index",title = "Google Index Score Per Month For High and Low Earners, Before and After Introduction of ScoreCard Data") + theme(plot.title = element_text(size = 9)) + labs(color = "High Earner")
+```
